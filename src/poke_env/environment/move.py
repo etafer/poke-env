@@ -8,13 +8,27 @@ from poke_env.utils import to_id_str
 
 from functools import lru_cache
 from typing import Dict
+from typing import List
 from typing import Optional
 from typing import Set
 from typing import Tuple
 from typing import Union
 
 
-special_moves: Dict
+SPECIAL_MOVES: Dict
+
+_PROTECT_MOVES = {
+    "protect",
+    "detect",
+    "endure",
+    "spikyshield",
+    "kingsshield",
+    "banefulbunker",
+    "obstruct",
+    "maxguard",
+}
+_SIDE_PROTECT_MOVES = {"wideguard", "quickguard", "matblock"}
+_PROTECT_COUNTER_MOVES = _PROTECT_MOVES | _SIDE_PROTECT_MOVES
 
 
 class Move:
@@ -40,6 +54,8 @@ class Move:
         "beforeMoveCallback",
     ]
 
+    __slots__ = "_id", "_current_pp", "_is_empty", "_request_target"
+
     def __init__(self, move: str = "", move_id: Optional[str] = None):
         if move_id:
             self._id = move_id
@@ -48,6 +64,8 @@ class Move:
         self._current_pp = self.max_pp
         self._is_empty: bool = False
 
+        self._request_target = None
+
     def __repr__(self) -> str:
         return f"{self._id} (Move object)"
 
@@ -55,11 +73,29 @@ class Move:
         self._current_pp -= 1
 
     @staticmethod
+    def is_id_z(id_) -> bool:
+        if id_.startswith("z") and id_[1:] in MOVES:
+            return True
+        return "isZ" in MOVES[id_]
+
+    @staticmethod
+    def is_max_move(id_) -> bool:
+        if id_.startswith("max"):
+            return True
+        if MOVES.get("isNonstandard", None) == "Gigantamax":
+            return True
+        return False
+
+    @staticmethod
+    @lru_cache(4096)
     def should_be_stored(move_id: str) -> bool:
-        if move_id in special_moves:
+        if move_id in SPECIAL_MOVES:
             return False
-        move = Move(move_id)
-        if move.is_z:
+        if move_id not in MOVES:
+            return False
+        if Move.is_id_z(move_id):
+            return False
+        if Move.is_max_move(move_id):
             return False
         return True
 
@@ -104,7 +140,7 @@ class Move:
         :return: Wheter there exist a z-move version of this move.
         :rtype: bool
         """
-        return bool(self.z_move_boost or self.z_move_power or self.z_move_effect)
+        return self.id not in SPECIAL_MOVES
 
     @property
     def category(self) -> MoveCategory:
@@ -144,6 +180,21 @@ class Move:
         return self.entry.get("damage", 0)
 
     @property
+    def deduced_target(self) -> Optional[str]:
+        """
+        :return: Move deduced target, based on Move.target and showdown's request
+            messages.
+        :rtype: str, optional
+        """
+        if self.id in SPECIAL_MOVES:
+            return self.target
+        elif self.request_target:
+            return self.request_target
+        elif self.target == "randomNormal":
+            return self.request_target
+        return self.target
+
+    @property
     def defensive_category(self) -> MoveCategory:
         """
         :return: Move's defender category.
@@ -160,7 +211,7 @@ class Move:
         :rtype: float
         """
         if "drain" in self.entry:
-            return self.entry["drain"]["0"] / self.entry["drain"]["1"]
+            return self.entry["drain"][0] / self.entry["drain"][1]
         return 0.0
 
     @property
@@ -177,6 +228,26 @@ class Move:
             return MOVES[self._id[1:]]
         else:
             raise ValueError("Unknown move: %s" % self._id)
+
+    @property
+    def expected_hits(self) -> float:
+        """
+        :return: Expected number of hits, between 1 and 5. Equal to n_hits if n_hits is
+            constant.
+        :rtype: float
+        """
+
+        if self._id == "triplekick" or self._id == "tripleaxel":
+            # Triple Kick and Triple Axel have an accuracy check for each hit, and also
+            # rise in BP for each hit
+            return 1 + 2 * 0.9 + 3 * 0.81
+        min_hits, max_hits = self.n_hit
+        if min_hits == max_hits:
+            return min_hits
+        else:
+            # It hits 2-5 times
+            assert min_hits == 2 and max_hits == 5
+            return (2 + 3) / 3 + (4 + 5) / 6
 
     @property
     def flags(self) -> Set[str]:
@@ -207,7 +278,7 @@ class Move:
         :rtype: float
         """
         if "heal" in self.entry:
-            return self.entry["heal"]["0"] / self.entry["heal"]["1"]
+            return self.entry["heal"][0] / self.entry["heal"][1]
         return 0.0
 
     @property
@@ -254,7 +325,8 @@ class Move:
                 return self.entry["ignoreImmunity"]
             else:
                 return {
-                    PokemonType[t.upper()] for t in self.entry["ignoreImmunity"].keys()
+                    PokemonType[t.upper().replace("'", "")]
+                    for t in self.entry["ignoreImmunity"].keys()
                 }
         return False
 
@@ -267,14 +339,36 @@ class Move:
         return self._is_empty
 
     @property
+    def is_protect_counter(self) -> bool:
+        """
+        :return: Wheter this move increments a mon's protect counter.
+        :rtype: int
+        """
+        return self._id in _PROTECT_COUNTER_MOVES
+
+    @property
+    def is_protect_move(self) -> bool:
+        """
+        :return: Wheter this move is a protect-like move.
+        :rtype: int
+        """
+        return self._id in _PROTECT_MOVES
+
+    @property
+    def is_side_protect_move(self) -> bool:
+        """
+        :return: Wheter this move is a side-protect move.
+        :rtype: int
+        """
+        return self._id in _SIDE_PROTECT_MOVES
+
+    @property
     def is_z(self) -> bool:
         """
         :return: Whether the move is a z move.
         :rtype: bool
         """
-        if self.id.startswith("z") and self.id[1:] in MOVES:
-            return True
-        return "isZ" in self.entry
+        return Move.is_id_z(self.id)
 
     @property
     def max_pp(self) -> int:
@@ -285,17 +379,17 @@ class Move:
         return self.entry["pp"]
 
     @property
-    def n_hit(self) -> Tuple[int, int]:
+    def n_hit(self) -> Tuple:
         """
         :return: How many hits this move lands. Tuple of the form (min, max).
-        :rtype: Tuple[int, int]
+        :rtype: Tuple
         """
         if "multihit" in self.entry:
-            if isinstance(self.entry["multihit"], dict):
-                return (self.entry["multihit"]["0"], self.entry["multihit"]["1"])
+            if isinstance(self.entry["multihit"], list):
+                return tuple(self.entry["multihit"])
             else:
-                return (self.entry["multihit"], self.entry["multihit"])
-        return (1, 1)
+                return self.entry["multihit"], self.entry["multihit"]
+        return 1, 1
 
     @property
     def no_pp_boosts(self) -> bool:
@@ -336,10 +430,27 @@ class Move:
         :rtype: float
         """
         if "recoil" in self.entry:
-            return self.entry["recoil"]["0"] / self.entry["recoil"]["1"]
+            return self.entry["recoil"][0] / self.entry["recoil"][1]
         elif "struggleRecoil" in self.entry:
             return 0.25
         return 0.0
+
+    @property
+    def request_target(self) -> Optional[str]:
+        """
+        :return: Target information sent by showdown in a request message, if any.
+        :rtype: str, optional
+        """
+        return self._request_target
+
+    @request_target.setter
+    def request_target(self, request_target: Optional[str]) -> None:
+        """
+        :param request_target: Target information received from showdown in a request
+            message.
+        "type request_target: str, optional
+        """
+        self._request_target = request_target
 
     @staticmethod
     @lru_cache(maxsize=4096)
@@ -356,20 +467,22 @@ class Move:
             return "hiddenpower"
         if move_name.startswith("return"):
             return "return"
+        if move_name.startswith("frustration"):
+            return "frustration"
         return move_name
 
     @property
-    def secondary(self) -> Optional[dict]:
+    def secondary(self) -> List[dict]:
         """
         :return: Secondary effects. At this point, the precise content of this property
             is not too clear.
         :rtype: Optional[Dict]
         """
-        if "secondary" in self.entry:
-            return self.entry["secondary"]
-        if "secondaries" in self.entry:
+        if "secondary" in self.entry and self.entry["secondary"]:
+            return [self.entry["secondary"]]
+        elif "secondaries" in self.entry:
             return self.entry["secondaries"]
-        return None
+        return []
 
     @property
     def self_boost(self) -> Optional[Dict[str, int]]:
@@ -452,7 +565,24 @@ class Move:
     @property
     def target(self) -> str:
         """
-        :return: Move target.
+        :return: Move target. Possible targets (copied from PS codebase):
+            * adjacentAlly - Only relevant to Doubles or Triples, the move only
+                targets an ally of the user.
+            * adjacentAllyOrSelf - The move can target the user or its ally.
+            * adjacentFoe - The move can target a foe, but not (in Triples)
+                a distant foe.
+            * all - The move targets the field or all Pokémon at once.
+            * allAdjacent - The move is a spread move that also hits the user's ally.
+            * allAdjacentFoes - The move is a spread move.
+            * allies - The move affects all active Pokémon on the user's team.
+            * allySide - The move adds a side condition on the user's side.
+            * allyTeam - The move affects all unfainted Pokémon on the user's team.
+            * any - The move can hit any other active Pokémon, not just those adjacent.
+            * foeSide - The move adds a side condition on the foe's side.
+            * normal - The move can hit one adjacent Pokémon of your choice.
+            * randomNormal - The move targets an adjacent foe at random.
+            * scripted - The move targets the foe that damaged the user.
+            * self - The move affects the user of the move.
         :rtype: str
         """
         return self.entry["target"]
@@ -508,12 +638,14 @@ class Move:
         return None
 
     @property
-    def z_move_boost(self) -> Dict[str, int]:
+    def z_move_boost(self) -> Optional[Dict[str, int]]:
         """
         :return: Boosts associated with the z-move version of this move.
         :rtype: Dict[str, int]
         """
-        return self.entry.get("zMoveBoost", None)
+        if "zMove" in self.entry and "boost" in self.entry["zMove"]:
+            return self.entry["zMove"]["boost"]
+        return None
 
     @property
     def z_move_effect(self) -> Optional[str]:
@@ -521,7 +653,9 @@ class Move:
         :return: Effects associated with the z-move version of this move.
         :rtype: Optional[str]
         """
-        return self.entry.get("zMoveEffect", None)
+        if "zMove" in self.entry and "effect" in self.entry["zMove"]:
+            return self.entry["zMove"]["effect"]
+        return None
 
     @property
     def z_move_power(self) -> int:
@@ -529,7 +663,32 @@ class Move:
         :return: Base power of the z-move version of this move.
         :rtype: int
         """
-        return self.entry.get("zMovePower", 0)
+        if "zMove" in self.entry and "basePower" in self.entry["zMove"]:
+            return self.entry["zMove"]["basePower"]
+        elif self.category == MoveCategory.STATUS:
+            return 0
+        base_power = self.base_power
+        if self.n_hit != (1, 1):
+            base_power *= 3
+        elif base_power <= 55:
+            return 100
+        elif base_power <= 65:
+            return 120
+        elif base_power <= 75:
+            return 140
+        elif base_power <= 85:
+            return 160
+        elif base_power <= 95:
+            return 175
+        elif base_power <= 100:
+            return 180
+        elif base_power <= 110:
+            return 185
+        elif base_power <= 125:
+            return 190
+        elif base_power <= 130:
+            return 195
+        return 200
 
 
 class EmptyMove(Move):
@@ -544,4 +703,4 @@ class EmptyMove(Move):
             return 0
 
 
-special_moves = {"struggle": Move("struggle"), "recharge": EmptyMove("recharge")}
+SPECIAL_MOVES = {"struggle": Move("struggle"), "recharge": EmptyMove("recharge")}

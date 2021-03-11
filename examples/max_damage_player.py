@@ -4,9 +4,6 @@ import time
 
 from poke_env.player.player import Player
 from poke_env.player.random_player import RandomPlayer
-from poke_env.player.utils import cross_evaluate
-from poke_env.player_configuration import PlayerConfiguration
-from poke_env.server_configuration import LocalhostServerConfiguration
 
 
 class MaxDamagePlayer(Player):
@@ -25,33 +22,16 @@ class MaxDamagePlayer(Player):
 async def main():
     start = time.time()
 
-    # We define two player configurations.
-    player_1_configuration = PlayerConfiguration("Random player", None)
-    player_2_configuration = PlayerConfiguration("Max damage player", None)
-
-    # We create the corresponding players.
-    random_player = RandomPlayer(
-        player_configuration=player_1_configuration,
-        battle_format="gen7randombattle",
-        server_configuration=LocalhostServerConfiguration,
-    )
-    max_damage_player = MaxDamagePlayer(
-        player_configuration=player_2_configuration,
-        battle_format="gen7randombattle",
-        server_configuration=LocalhostServerConfiguration,
-    )
+    # We create two players.
+    random_player = RandomPlayer(battle_format="gen8randombattle")
+    max_damage_player = MaxDamagePlayer(battle_format="gen8randombattle")
 
     # Now, let's evaluate our player
-    cross_evaluation = await cross_evaluate(
-        [random_player, max_damage_player], n_challenges=100
-    )
+    await max_damage_player.battle_against(random_player, n_battles=100)
 
     print(
         "Max damage player won %d / 100 battles [this took %f seconds]"
-        % (
-            cross_evaluation[max_damage_player.username][random_player.username] * 100,
-            time.time() - start,
-        )
+        % (max_damage_player.n_won_battles, time.time() - start)
     )
 
 

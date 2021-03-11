@@ -3,8 +3,8 @@ from typing import Any
 from typing import Dict
 from typing import List
 from typing import Optional
-from typing import Set
 from typing import Tuple
+from typing import Union
 
 from poke_env.data import POKEDEX
 from poke_env.environment.effect import Effect
@@ -17,30 +17,61 @@ from poke_env.utils import to_id_str
 
 
 class Pokemon:
+
+    __slots__ = (
+        "_ability",
+        "_active",
+        "_active",
+        "_base_stats",
+        "_boosts",
+        "_current_hp",
+        "_effects",
+        "_first_turn",
+        "_gender",
+        "_heightm",
+        "_item",
+        "_last_details",
+        "_last_request",
+        "_level",
+        "_max_hp",
+        "_moves",
+        "_must_recharge",
+        "_possible_abilities",
+        "_preparing",
+        "_protect_counter",
+        "_shiny",
+        "_revealed",
+        "_species",
+        "_status",
+        "_status_counter",
+        "_type_1",
+        "_type_2",
+        "_weightkg",
+    )
+
     def __init__(
         self,
         *,
         species: Optional[str] = None,
         request_pokemon: Optional[Dict[str, Any]] = None,
+        details: Optional[str] = None,
     ) -> None:
         # Species related attributes
         self._base_stats: Dict[str, int]
         self._heightm: int
         self._possible_abilities: List[str]
-        self._species: str
+        self._species: str = ""
         self._type_1: PokemonType
         self._type_2: Optional[PokemonType] = None
         self._weightkg: int
 
         # Individual related attributes
-        self._ability: str
+        self._ability: Optional[str] = None
         self._active: bool
-        self._base_ability: str
-        self._gender: PokemonGender
+        self._gender: Optional[PokemonGender] = None
         self._level: int = 100
         self._max_hp: int = 0
         self._moves: Dict[str, Move] = {}
-        self._pokeball: Optional[str] = None
         self._shiny: Optional[bool] = False
 
         # Battle related attributes
@@ -56,36 +87,48 @@ class Pokemon:
             "spe": 0,
         }
         self._current_hp: int = 0
-        self._effects: Set[Effect] = set()
-        self._item: str
+        self._effects: Dict[Effect, int] = {}
+        self._first_turn: bool = False
+        self._item: Optional[str] = None
+        self._last_request: dict = {}
+        self._last_details: str = ""
         self._must_recharge = False
         self._preparing = False
+        self._protect_counter: int = 0
+        self._revealed: bool = False
         self._status: Optional[Status] = None
+        self._status_counter: int = 0
 
-        if species:
-            self._update_from_pokedex(species)
-            self._species = species
-        elif request_pokemon:
+        if request_pokemon:
             self._update_from_request(request_pokemon)
+        elif details:
+            self._update_from_details(details)
+        elif species:
+            self._update_from_pokedex(species)
 
     def __repr__(self) -> str:
         return self.__str__()
 
     def __str__(self) -> str:
-        return f"{self._species} (pokemon object) "
-        "[Active: {self._active}, Status: {self._status}]"
+        return (
+            f"{self._species} (pokemon object) "
+            f"[Active: {self._active}, Status: {self._status}]"
+        )
 
-    def _add_move(self, move_id: str, use: bool = False) -> None:
+    def _add_move(self, move_id: str, use: bool = False) -> Optional[Move]:
         """Store the move if applicable."""
         id_ = Move.retrieve_id(move_id)
-        if Move.should_be_stored(id_):
-            move = Move(id_)
-            if move.id not in self._moves:
-                if len(self._moves) >= 4:
-                    self._moves = {}
-                self._moves[move.id] = Move(id_)
-            if use:
-                self.moves[move.id].use()
+
+        if not Move.should_be_stored(id_):
+            return
+
+        if id_ not in self._moves:
+            move = Move(move_id=id_)
+            self._moves[id_] = move
+        if use:
+            self._moves[id_].use()
+
+        return self._moves[id_]
 
     def _boost(self, stat, amount):
         self._boosts[stat] += int(amount)
@@ -94,12 +137,19 @@ class Pokemon:
         elif self._boosts[stat] < -6:
             self._boosts[stat] = -6
 
+    def _cant_move(self):
+        self._first_turn = False
+        self._protect_counter = 0
+
+        if self._status == Status.SLP:
+            self._status_counter += 1
+
     def _clear_boosts(self):
         for stat in self._boosts:
             self._boosts[stat] = 0
 
     def _clear_effects(self):
-        self._effects = set()
+        self._effects = {}
 
     def _clear_negative_boosts(self):
         for stat, value in self._boosts.items():
@@ -111,19 +161,36 @@ class Pokemon:
             if value > 0:
                 self._boosts[stat] = 0
 
-    def _cure_status(self, status):
-        if Status[status.upper()] == self._status:
+    def _copy_boosts(self, mon):
+        self._boosts = dict(mon._boosts.items())
+
+    def _cure_status(self, status=None):
+        if status and Status[status.upper()] == self._status:
+            self._status = None
+            self._status_counter = 0
+        elif status is None and not self.fainted:
             self._status = None
 
     def _damage(self, hp_status):
         self._set_hp_status(hp_status)
 
     def _end_effect(self, effect):
-        if Effect.from_showdown_message(effect) in self._effects:
-            self._effects.remove(Effect.from_showdown_message(effect))
+        effect = Effect.from_showdown_message(effect)
+        if effect in self._effects:
+            self._effects.pop(effect)
 
     def _end_item(self, item):
         self._item = None
+
+        if item == "powerherb":
+            self._preparing = False
+
+    def _end_turn(self):
+        if self._status == Status.TOX:
+            self._status_counter += 1
+        for effect in self.effects:
+            if effect.is_turn_countable:
+                self.effects[effect] += 1
 
     def _faint(self):
         self._current_hp = 0
@@ -131,32 +198,51 @@ class Pokemon:
 
     def _forme_change(self, species):
         species = species.split(",")[0]
-        self._update_from_pokedex(species)
+        self._update_from_pokedex(species, store_species=False)
 
     def _heal(self, hp_status):
         self._set_hp_status(hp_status)
 
-    def _mega_evolve(self, stone):
-        mega_species = self.species + "mega"
-        if mega_species in POKEDEX:
-            self._species = mega_species
-            self._update_from_pokedex(mega_species)
-        elif stone[-1] in "XY":
-            mega_species = self.species + "mega" + stone[-1].lower()
-            self._species = mega_species
-            self._update_from_pokedex(mega_species)
+    def _invert_boosts(self):
+        self._boosts = {k: -v for k, v in self._boosts.items()}
 
-    def _moved(self, move):
+    def _mega_evolve(self, stone):
+        species_id_str = to_id_str(self.species)
+        mega_species = (
+            species_id_str + "mega"
+            if not species_id_str.endswith("mega")
+            else species_id_str
+        )
+        if mega_species in POKEDEX:
+            self._update_from_pokedex(mega_species, store_species=False)
+        elif stone[-1] in "XY":
+            mega_species = mega_species + stone[-1].lower()
+            self._update_from_pokedex(mega_species, store_species=False)
+
+    def _moved(self, move, target=None):
         self._must_recharge = False
         self._preparing = False
-        self._add_move(move, use=True)
+        move = self._add_move(move, use=True)
+
+        if move and move.is_protect_counter and target:
+            self._protect_counter += 1
+        else:
+            self._protect_counter = 0
+
+        if self._status == Status.SLP:
+            self._status_counter += 1
 
     def _prepare(self, move, target):
         self._preparing = (move, target)
 
     def _primal(self):
-        primal_species = self._species + "primal"
-        self._update_from_pokedex(primal_species)
+        species_id_str = to_id_str(self._species)
+        primal_species = (
+            species_id_str + "primal"
+            if not species_id_str.endswith("primal")
+            else species_id_str
+        )
+        self._update_from_pokedex(primal_species, store_species=False)
 
     def _set_boost(self, stat, amount):
         assert abs(int(amount)) <= 6
@@ -166,42 +252,66 @@ class Pokemon:
         self._set_hp_status(hp_status)
 
     def _set_hp_status(self, hp_status):
+        if hp_status == "0 fnt":
+            self._faint()
+            return
+
         if " " in hp_status:
             hp, status = hp_status.split(" ")
+            self.status = Status[status.upper()]
         else:
             hp = hp_status
-            status = None
 
-        if status == "fnt":
-            self.status = Status.FNT
-            self._current_hp = 0
-            return
-        elif status:
-            self.status = status
-        self._current_hp, self._max_hp = hp.split("/")
+        hp = "".join([c for c in hp if c in "0123456789/"]).split("/")
+        self._current_hp, self._max_hp = hp
         self._current_hp = int(self._current_hp)
         self._max_hp = int(self._max_hp)
 
     def _start_effect(self, effect):
-        self._effects.add(Effect.from_showdown_message(effect))
+        effect = Effect.from_showdown_message(effect)
+        if effect not in self._effects:
+            self._effects[effect] = 0
+        elif effect.is_action_countable:
+            self._effects[Effect] += 1
 
-    def _switch_in(self):
+        if effect.breaks_protect:
+            self._protect_counter = 0
+
+    def _swap_boosts(self):
+        self._boosts["atk"], self._boosts["spa"] = (
+            self._boosts["spa"],
+            self._boosts["atk"],
+        )
+
+    def _switch_in(self, details=None):
         self._active = True
+
+        if details:
+            self._update_from_details(details)
+
+        self._first_turn = True
+        self._revealed = True
 
     def _switch_out(self):
         self._active = False
         self._clear_boosts()
         self._clear_effects()
+        self._first_turn = False
         self._must_recharge = False
         self._preparing = False
+        self._protect_counter = 0
 
     def _transform(self, into):
         current_hp = self.current_hp
-        self._update_from_pokedex(into.species)
+        self._update_from_pokedex(into.species, store_species=False)
         self._current_hp = int(current_hp)
+        self._boosts = into.boosts.copy()
 
-    def _update_from_pokedex(self, species: str) -> None:
-        dex_entry = POKEDEX[to_id_str(species)]
+    def _update_from_pokedex(self, species: str, store_species: bool = True) -> None:
+        species = to_id_str(species)
+        dex_entry = POKEDEX[species]
+        if store_species:
+            self._species = species
         self._base_stats = dex_entry["baseStats"]
 
         self._type_1 = PokemonType.from_name(dex_entry["types"][0])
@@ -214,29 +324,11 @@ class Pokemon:
         self._heightm = dex_entry["heightm"]
         self._weightkg = dex_entry["weightkg"]
 
-    def _update_from_request(self, request_pokemon: Dict[str, Any]) -> None:
-        self._ability = request_pokemon["ability"]
-        self._active = request_pokemon["active"]
-        self._base_ability = request_pokemon["baseAbility"]
-
-        condition = request_pokemon["condition"]
-        if condition == "0 fnt":
-            self._current_hp = 0
-            self.status = Status.FNT
+    def _update_from_details(self, details: str) -> None:
+        if details == self._last_details:
+            return
         else:
-            if " " in condition:
-                hps, status = condition.split(" ")
-                self.status = status
-            else:
-                hps = condition
-                self.status = None
-            current_hp, max_hp = hps.split("/")
-            self._current_hp = int(current_hp)
-            self._max_hp = int(max_hp)
-
-        self._item = request_pokemon["item"]
-
-        details = request_pokemon["details"]
+            self._last_details = details
 
         if ", shiny" in details:
             self._shiny = True
@@ -244,50 +336,62 @@ class Pokemon:
         else:
             self._shiny = False
 
-        details = details.split(", ")
+        split_details = details.split(", ")
 
-        gender = PokemonGender.NEUTRAL
-        level = 100
+        gender = None
+        level = None
 
-        if len(details) == 3:
-            species, level, gender = details
-        elif len(details) == 2:
-            if details[1].startswith("L"):
-                species, level = details
+        if len(split_details) == 3:
+            species, level, gender = split_details
+        elif len(split_details) == 2:
+            if split_details[1].startswith("L"):
+                species, level = split_details
             else:
-                species, gender = details
+                species, gender = split_details
         else:
-            species = details[0]
+            species = to_id_str(split_details[0])
 
-        if not isinstance(gender, PokemonGender):
-            gender = PokemonGender.from_request_details(gender)
-        if not isinstance(level, int):
-            level = int(level[1:])
+        if gender:
+            self._gender = PokemonGender.from_request_details(gender)
+        else:
+            self._gender = PokemonGender.NEUTRAL
+
+        if level:
+            self._level = int(level[1:])
+        else:
+            self._level = 100
+
         if species != self._species:
             self._update_from_pokedex(species)
 
-        self._gender = gender
-        self._level = level
+    def _update_from_request(self, request_pokemon: Dict[str, Any]) -> None:
+        self._active = request_pokemon["active"]
 
-        # This might cause some unnecessary resets with special moves, such as
-        # hiddenpower
-        all_moves = set(self._moves.keys()).union(request_pokemon["moves"])
-        if len(all_moves) > 4:
-            for move in list(self._moves):
-                if move not in request_pokemon["moves"]:
-                    self._moves.pop(move)
+        if request_pokemon == self._last_request:
+            return
+
+        if "ability" in request_pokemon:
+            self._ability = request_pokemon["ability"]
+        elif "baseAbility" in request_pokemon:
+            self._ability = request_pokemon["baseAbility"]
+
+        self._last_request = request_pokemon
+
+        condition = request_pokemon["condition"]
+        self._set_hp_status(condition)
+
+        self._item = request_pokemon["item"]
+
+        details = request_pokemon["details"]
+        self._update_from_details(details)
+
         for move in request_pokemon["moves"]:
             self._add_move(move)
-        ident = request_pokemon["ident"].split(": ")
 
-        if len(ident) == 2:
-            self._species = ident[1]
-        elif len(ident) == 3:
-            self._species = ": ".join(ident[1:])
-        else:
-            raise NotImplementedError("Unmanaged pokemon ident: %s" % ident)
-        self._pokeball = request_pokemon["pokeball"]
-        self._stats = request_pokemon["stats"]
+        if len(self._moves) > 4:
+            self._moves = {}
+            for move in request_pokemon["moves"]:
+                self._add_move(move)
 
     def _used_z_move(self):
         self._item = None
@@ -298,16 +402,35 @@ class Pokemon:
         self._status = None
         self._switch_out()
 
-    @property
-    def ability(self) -> str:
+    def damage_multiplier(self, type_or_move: Union[PokemonType, Move]) -> float:
         """
-        :return: The pokemon's ability.
-        :rtype: str
+        Returns the damage multiplier associated with a given type or move on this
+        pokemon.
+
+        This method is a shortcut for PokemonType.damage_multiplier with relevant types.
+
+        :param type_or_move: The type or move of interest.
+        :type type_or_move: PokemonType or Move
+        :return: The damage multiplier associated with given type on the pokemon.
+        :rtype: float
+        """
+        if isinstance(type_or_move, Move):
+            type_or_move = type_or_move.type
+        if isinstance(type_or_move, PokemonType):
+            return type_or_move.damage_multiplier(self._type_1, self._type_2)
+        # This can happen with special moves, which do not necessarily have a type
+        return 1
+
+    @property
+    def ability(self) -> Optional[str]:
+        """
+        :return: The pokemon's ability. None if unknown.
+        :rtype: str, optional
         """
         return self._ability
 
     @ability.setter
-    def ability(self, ability: str):
+    def ability(self, ability: Optional[str]):
         self._ability = ability
 
     @property
@@ -331,11 +454,11 @@ class Pokemon:
             if type_:
                 return [
                     move
-                    for move_id, move in self.moves.items()
+                    for move_id, move in self._moves.items()
                     if move.type == type_ and move.can_z_move
                 ]
-            elif move in self.moves:
-                return [self.moves[move]]
+            elif move in self._moves:
+                return [self._moves[move]]
         return []
 
     @property
@@ -352,7 +475,7 @@ class Pokemon:
         :return: The pokemon's boosts.
         :rtype: Dict[str, int]
         """
-        return self._boost
+        return self._boosts
 
     @property
     def current_hp(self) -> int:
@@ -375,10 +498,11 @@ class Pokemon:
         return 0
 
     @property
-    def effects(self) -> Set[Effect]:
+    def effects(self) -> Dict[Effect, int]:
         """
-        :return: The effects currently affecting the pokemon.
-        :rtype: Set[Effect]
+        :return: A dict mapping the effects currently affecting the pokemon and the
+            associated counter.
+        :rtype: Dict[Effect, int]
         """
         return self._effects
 
@@ -391,10 +515,18 @@ class Pokemon:
         return Status.FNT == self._status
 
     @property
-    def gender(self) -> PokemonGender:
+    def first_turn(self) -> bool:
+        """
+        :return: Wheter this is this pokemon's first action since its last switch in.
+        :rtype: bool
+        """
+        return self._first_turn
+
+    @property
+    def gender(self) -> Optional[PokemonGender]:
         """
         :return: The pokemon's gender.
-        :rtype: PokemonGender
+        :rtype: PokemonGender, optional
         """
         return self._gender
 
@@ -405,6 +537,14 @@ class Pokemon:
         :rtype: float
         """
         return self._heightm
+
+    @property
+    def is_dynamaxed(self) -> bool:
+        """
+        :return: Whether the pokemon is currently dynamaxed
+        :rtype: bool
+        """
+        return Effect.DYNAMAX in self.effects
 
     @property
     def item(self) -> Optional[str]:
@@ -462,7 +602,7 @@ class Pokemon:
         :return: The pokeball in which is the pokemon.
         :rtype: Optional[str]
         """
-        return self._pokeball
+        return self._last_request.get("pokeball", None)
 
     @property
     def possible_abilities(self) -> List[str]:
@@ -481,6 +621,22 @@ class Pokemon:
         return self._preparing
 
     @property
+    def protect_counter(self) -> int:
+        """
+        :return: How many protect-like moves where used in a row by this pokemon.
+        :rtype: int
+        """
+        return self._protect_counter
+
+    @property
+    def revealed(self) -> bool:
+        """
+        :return: Whether this pokemon has appeared in the current battle.
+        :rtype: bool
+        """
+        return self._revealed
+
+    @property
     def shiny(self) -> bool:
         """
         :return: Whether this pokemon is shiny.
@@ -497,12 +653,30 @@ class Pokemon:
         return self._species
 
     @property
+    def stats(self) -> Dict[str, Optional[int]]:
+        """
+        :return: The pokemon's stats, as a dictionary.
+        :rtype: Dict[str, Optional[int]]
+        """
+        return self._last_request.get(
+            "stats", {"atk": None, "def": None, "spa": None, "spd": None, "spe": None}
+        )
+
+    @property
     def status(self) -> Optional[Status]:
         """
         :return: The pokemon's status.
         :rtype: Optional[Status]
         """
         return self._status
+
+    @property
+    def status_counter(self) -> int:
+        """
+        :return: The pokemon's status turn count. Only counts TOXIC and SLEEP statuses.
+        :rtype: int
+        """
+        return self._status_counter
 
     @status.setter
     def status(self, status):

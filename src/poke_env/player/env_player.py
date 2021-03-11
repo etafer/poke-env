@@ -8,12 +8,15 @@ from gym.core import Env  # pyre-ignore
 from queue import Queue
 from threading import Thread
 
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple, Union
 
+from poke_env.environment.abstract_battle import AbstractBattle
 from poke_env.environment.battle import Battle
+from poke_env.player.battle_order import BattleOrder
 from poke_env.player.player import Player
 from poke_env.player_configuration import PlayerConfiguration
 from poke_env.server_configuration import ServerConfiguration
+from poke_env.teambuilder.teambuilder import Teambuilder
 from poke_env.utils import to_id_str
 
 import asyncio
@@ -22,66 +25,83 @@ import time
 
 
 class EnvPlayer(Player, Env, ABC):  # pyre-ignore
-    """Player exposing the Open AI Gym Env API. Recommended use is with play_against.
-    """
+    """Player exposing the Open AI Gym Env API. Recommended use is with play_against."""
 
+    _ACTION_SPACE = None
+    _DEFAULT_BATTLE_FORMAT = "gen8randombattle"
     MAX_BATTLE_SWITCH_RETRY = 10000
     PAUSE_BETWEEN_RETRIES = 0.001
 
     def __init__(
         self,
-        player_configuration: PlayerConfiguration,
+        player_configuration: Optional[PlayerConfiguration] = None,
         *,
         avatar: Optional[int] = None,
-        battle_format: str,
+        battle_format: Optional[str] = None,
         log_level: Optional[int] = None,
-        server_configuration: ServerConfiguration,
+        server_configuration: Optional[ServerConfiguration] = None,
         start_listening: bool = True,
+        start_timer_on_battle_start: bool = False,
+        team: Optional[Union[str, Teambuilder]] = None,
     ):
         """
-        :param player_configuration: Player configuration.
-        :type player_configuration: PlayerConfiguration
+        :param player_configuration: Player configuration. If empty, defaults to an
+            automatically generated username with no password. This option must be set
+            if the server configuration requires authentication.
+        :type player_configuration: PlayerConfiguration, optional
         :param avatar: Player avatar id. Optional.
         :type avatar: int, optional
-        :param battle_format: Name of the battle format this player plays.
-        :type battle_format: str
+        :param battle_format: Name of the battle format this player plays. Defaults to
+            gen8randombattle.
+        :type battle_format: Optional, str. Default to randombattles, with specifics
+            varying per class.
         :param log_level: The player's logger level.
         :type log_level: int. Defaults to logging's default level.
-        :param server_configuration: Server configuration.
-        :type server_configuration: ServerConfiguration
-        :param start_listening: Wheter to start listening to the server. Defaults to
+        :param server_configuration: Server configuration. Defaults to Localhost Server
+            Configuration.
+        :type server_configuration: ServerConfiguration, optional
+        :param start_listening: Whether to start listening to the server. Defaults to
             True.
         :type start_listening: bool
+        :param start_timer_on_battle_start: Whether to automatically start the battle
+            timer on battle start. Defaults to False.
+        :type start_timer_on_battle_start: bool
+        :param team: The team to use for formats requiring a team. Can be a showdown
+            team string, a showdown packed team string, of a ShowdownTeam object.
+            Defaults to None.
+        :type team: str or Teambuilder, optional
         """
         super(EnvPlayer, self).__init__(
             player_configuration=player_configuration,
             avatar=avatar,
-            battle_format=battle_format,
+            battle_format=battle_format
+            if battle_format is not None
+            else self._DEFAULT_BATTLE_FORMAT,
             log_level=log_level,
             max_concurrent_battles=1,
             server_configuration=server_configuration,
             start_listening=start_listening,
+            start_timer_on_battle_start=start_timer_on_battle_start,
+            team=team,
         )
         self._actions = {}
-        self._current_battle: Battle
+        self._current_battle: AbstractBattle
         self._observations = {}
         self._reward_buffer = {}
         self._start_new_battle = False
 
     @abstractmethod
-    def _action_to_move(self, action: int, battle: Battle) -> str:
-        """Abstract method converting elements of the action space to move orders.
-        """
-        pass
+    def _action_to_move(self, action: int, battle: AbstractBattle) -> BattleOrder:
+        """Abstract method converting elements of the action space to move orders."""
 
-    def _battle_finished_callback(self, battle: Battle) -> None:
+    def _battle_finished_callback(self, battle: AbstractBattle) -> None:
         self._observations[battle].put(self.embed_battle(battle))
 
-    def _init_battle(self, battle: Battle) -> None:
+    def _init_battle(self, battle: AbstractBattle) -> None:
         self._observations[battle] = Queue()
         self._actions[battle] = Queue()
 
-    def choose_move(self, battle: Battle) -> str:
+    def choose_move(self, battle: AbstractBattle) -> BattleOrder:
         if battle not in self._observations or battle not in self._actions:
             self._init_battle(battle)
         self._observations[battle].put(self.embed_battle(battle))
@@ -91,7 +111,6 @@ class EnvPlayer(Player, Env, ABC):  # pyre-ignore
 
     def close(self) -> None:
         """Unimplemented. Has no effect."""
-        pass
 
     def complete_current_battle(self) -> None:
         """Completes the current battle by performing random moves."""
@@ -99,29 +118,28 @@ class EnvPlayer(Player, Env, ABC):  # pyre-ignore
         while not done:
             _, _, done, _ = self.step(np.random.choice(self._ACTION_SPACE))
 
-    def compute_reward(self, battle: Battle) -> float:
+    def compute_reward(self, battle: AbstractBattle) -> float:
         """Returns a reward for the given battle.
 
         The default implementation corresponds to the default parameters of the
         reward_computing_helper method.
 
         :param battle: The battle for which to compute the reward.
-        :type battle: Battle
+        :type battle: AbstractBattle
         :return: The computed reward.
         :rtype: float
         """
         return self.reward_computing_helper(battle)
 
     @abstractmethod
-    def embed_battle(self, battle: Battle) -> Any:
+    def embed_battle(self, battle: AbstractBattle) -> Any:
         """Abstract method for embedding battles.
 
         :param battle: The battle whose state is being embedded
-        :type battle: Battle
+        :type battle: AbstractBattle
         :return: The computed embedding
         :rtype: Any
         """
-        pass
 
     def reset(self) -> Any:
         """Resets the internal environment state. The current battle will be set to an
@@ -143,8 +161,7 @@ class EnvPlayer(Player, Env, ABC):  # pyre-ignore
             raise EnvironmentError("User %s has no active battle." % self.username)
 
     def render(self, mode="human") -> None:
-        """A one line rendering of the current state of the battle.
-        """
+        """A one line rendering of the current state of the battle."""
         print(
             "  Turn %4d. | [%s][%3d/%3dhp] %10.10s - %10.10s [%3d%%hp][%s]"
             % (
@@ -172,7 +189,7 @@ class EnvPlayer(Player, Env, ABC):  # pyre-ignore
 
     def reward_computing_helper(
         self,
-        battle: Battle,
+        battle: AbstractBattle,
         *,
         fainted_value: float = 0.0,
         hp_value: float = 0.0,
@@ -206,7 +223,7 @@ class EnvPlayer(Player, Env, ABC):  # pyre-ignore
             = - 3 + 3 * 0 - 1.5 = -4.5
 
         :param battle: The battle for which to compute rewards.
-        :type battle: Battle
+        :type battle: AbstractBattle
         :param fainted_value: The reward weight for fainted pokemons. Defaults to 0.
         :type fainted_value: float
         :param hp_value: The reward weight for hp per pokemon. Defaults to 0.
@@ -267,8 +284,11 @@ class EnvPlayer(Player, Env, ABC):  # pyre-ignore
             indicating wheter the episode is finished, and additional information
         :rtype: tuple
         """
-        self._actions[self._current_battle].put(action)
-        observation = self._observations[self._current_battle].get()
+        if self._current_battle.finished:
+            observation = self.reset()
+        else:
+            self._actions[self._current_battle].put(action)
+            observation = self._observations[self._current_battle].get()
         return (
             observation,
             self.compute_reward(self._current_battle),
@@ -346,10 +366,129 @@ class EnvPlayer(Player, Env, ABC):  # pyre-ignore
         pass
 
 
-class Gen7EnvSinglePlayer(EnvPlayer):
-    _ACTION_SPACE = list(range(3 * 4 + 6))
+class Gen4EnvSinglePlayer(EnvPlayer):  # pyre-ignore
+    _ACTION_SPACE = list(range(4 + 6))
+    _DEFAULT_BATTLE_FORMAT = "gen4randombattle"
 
-    def _action_to_move(self, action: int, battle: Battle) -> str:
+    def _action_to_move(  # pyre-ignore
+        self, action: int, battle: Battle
+    ) -> BattleOrder:
+        """Converts actions to move orders.
+
+        The conversion is done as follows:
+
+        0 <= action < 4:
+            The actionth available move in battle.available_moves is executed.
+        4 <= action < 10
+            The action - 4th available switch in battle.available_switches is executed.
+
+        If the proposed action is illegal, a random legal move is performed.
+
+        :param action: The action to convert.
+        :type action: int
+        :param battle: The battle in which to act.
+        :type battle: Battle
+        :return: the order to send to the server.
+        :rtype: str
+        """
+        if (
+            action < 4
+            and action < len(battle.available_moves)
+            and not battle.force_switch
+        ):
+            return self.create_order(battle.available_moves[action])
+        elif 0 <= action - 4 < len(battle.available_switches):
+            return self.create_order(battle.available_switches[action - 4])
+        else:
+            return self.choose_random_move(battle)
+
+    @property
+    def action_space(self) -> List:
+        """The action space for gen 7 single battles.
+
+        The conversion to moves is done as follows:
+
+        0 <= action < 4:
+            The actionth available move in battle.available_moves is executed.
+        4 <= action < 10
+            The action - 4th available switch in battle.available_switches is executed.
+        """
+        return self._ACTION_SPACE
+
+
+class Gen5EnvSinglePlayer(Gen4EnvSinglePlayer):  # pyre-ignore
+    _DEFAULT_BATTLE_FORMAT = "gen5randombattle"
+
+
+class Gen6EnvSinglePlayer(EnvPlayer):  # pyre-ignore
+    _ACTION_SPACE = list(range(2 * 4 + 6))
+    _DEFAULT_BATTLE_FORMAT = "gen6randombattle"
+
+    def _action_to_move(  # pyre-ignore
+        self, action: int, battle: Battle
+    ) -> BattleOrder:
+        """Converts actions to move orders.
+
+        The conversion is done as follows:
+
+        0 <= action < 4:
+            The actionth available move in battle.available_moves is executed.
+        4 <= action < 8:
+            The action - 8th available move in battle.available_moves is executed, with
+            mega-evolution.
+        8 <= action < 14
+            The action - 8th available switch in battle.available_switches is executed.
+
+        If the proposed action is illegal, a random legal move is performed.
+
+        :param action: The action to convert.
+        :type action: int
+        :param battle: The battle in which to act.
+        :type battle: Battle
+        :return: the order to send to the server.
+        :rtype: str
+        """
+        if (
+            action < 4
+            and action < len(battle.available_moves)
+            and not battle.force_switch
+        ):
+            return self.create_order(battle.available_moves[action])
+        elif (
+            battle.can_mega_evolve
+            and 0 <= action - 4 < len(battle.available_moves)
+            and not battle.force_switch
+        ):
+            return self.create_order(battle.available_moves[action - 8], mega=True)
+        elif 0 <= action - 12 < len(battle.available_switches):
+            return self.create_order(battle.available_switches[action - 12])
+        else:
+            return self.choose_random_move(battle)
+
+    @property
+    def action_space(self) -> List:
+        """The action space for gen 7 single battles.
+
+        The conversion to moves is done as follows:
+
+        0 <= action < 4:
+            The actionth available move in battle.available_moves is executed.
+        4 <= action < 8:
+            The action - 8th available move in battle.available_moves is executed, with
+            mega-evolution.
+        8 <= action < 14
+            The action - 8th available switch in battle.available_switches is executed.
+        """
+        return self._ACTION_SPACE
+
+
+class Gen7EnvSinglePlayer(EnvPlayer):  # pyre-ignore
+    _ACTION_SPACE = list(range(3 * 4 + 6))
+    _DEFAULT_BATTLE_FORMAT = "gen7randombattle"
+
+    def _action_to_move(  # pyre-ignore
+        self, action: int, battle: Battle
+    ) -> BattleOrder:
         """Converts actions to move orders.
 
         The conversion is done as follows:
@@ -383,7 +522,10 @@ class Gen7EnvSinglePlayer(EnvPlayer):
         elif (
             not battle.force_switch
             and battle.can_z_move
-            and 0 <= action - 4 < len(battle.active_pokemon.available_z_moves)
+            and battle.active_pokemon
+            and 0
+            <= action - 4
+            < len(battle.active_pokemon.available_z_moves)  # pyre-ignore
         ):
             return self.create_order(
                 battle.active_pokemon.available_z_moves[action - 4], z_move=True
@@ -415,6 +557,101 @@ class Gen7EnvSinglePlayer(EnvPlayer):
                 with mega-evolution.
             12 <= action < 18
                 The action - 12th available switch in battle.available_switches is
+                executed.
+        """
+        return self._ACTION_SPACE
+
+
+class Gen8EnvSinglePlayer(EnvPlayer):  # pyre-ignore
+    _ACTION_SPACE = list(range(4 * 4 + 6))
+    _DEFAULT_BATTLE_FORMAT = "gen8randombattle"
+
+    def _action_to_move(  # pyre-ignore
+        self, action: int, battle: Battle
+    ) -> BattleOrder:
+        """Converts actions to move orders.
+
+        The conversion is done as follows:
+
+        0 <= action < 4:
+            The actionth available move in battle.available_moves is executed.
+        4 <= action < 8:
+            The action - 4th available move in battle.available_moves is executed, with
+            z-move.
+        8 <= action < 12:
+            The action - 8th available move in battle.available_moves is executed, with
+            mega-evolution.
+        8 <= action < 12:
+            The action - 8th available move in battle.available_moves is executed, with
+            mega-evolution.
+        12 <= action < 16:
+            The action - 12th available move in battle.available_moves is executed,
+            while dynamaxing.
+        16 <= action < 22
+            The action - 16th available switch in battle.available_switches is executed.
+
+        If the proposed action is illegal, a random legal move is performed.
+
+        :param action: The action to convert.
+        :type action: int
+        :param battle: The battle in which to act.
+        :type battle: Battle
+        :return: the order to send to the server.
+        :rtype: str
+        """
+        if (
+            action < 4
+            and action < len(battle.available_moves)
+            and not battle.force_switch
+        ):
+            return self.create_order(battle.available_moves[action])
+        elif (
+            not battle.force_switch
+            and battle.can_z_move
+            and battle.active_pokemon
+            and 0
+            <= action - 4
+            < len(battle.active_pokemon.available_z_moves)  # pyre-ignore
+        ):
+            return self.create_order(
+                battle.active_pokemon.available_z_moves[action - 4], z_move=True
+            )
+        elif (
+            battle.can_mega_evolve
+            and 0 <= action - 8 < len(battle.available_moves)
+            and not battle.force_switch
+        ):
+            return self.create_order(battle.available_moves[action - 8], mega=True)
+        elif (
+            battle.can_dynamax
+            and 0 <= action - 12 < len(battle.available_moves)
+            and not battle.force_switch
+        ):
+            return self.create_order(battle.available_moves[action - 12], dynamax=True)
+        elif 0 <= action - 16 < len(battle.available_switches):
+            return self.create_order(battle.available_switches[action - 16])
+        else:
+            return self.choose_random_move(battle)
+
+    @property
+    def action_space(self) -> List:
+        """The action space for gen 7 single battles.
+
+        The conversion to moves is done as follows:
+
+            0 <= action < 4:
+                The actionth available move in battle.available_moves is executed.
+            4 <= action < 8:
+                The action - 4th available move in battle.available_moves is executed,
+                with z-move.
+            8 <= action < 12:
+                The action - 8th available move in battle.available_moves is executed,
+                with mega-evolution.
+            12 <= action < 16:
+                The action - 12th available move in battle.available_moves is executed,
+                while dynamaxing.
+            16 <= action < 22
+                The action - 16th available switch in battle.available_switches is
                 executed.
         """
         return self._ACTION_SPACE
