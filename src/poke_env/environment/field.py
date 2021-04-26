@@ -4,11 +4,14 @@
 # pyre-ignore-all-errors[45]
 from enum import Enum, unique, auto
 
+import logging
+
 
 @unique
 class Field(Enum):
     """Enumeration, represent a non null field in a battle."""
 
+    _UNKNOWN = auto()
     ELECTRIC_TERRAIN = auto()
     GRASSY_TERRAIN = auto()
     GRAVITY = auto()
@@ -36,4 +39,18 @@ class Field(Enum):
         """
         message = message.replace("move: ", "")
         message = message.replace(" ", "_")
-        return Field[message.upper()]
+
+        if message.endswith("terrain") and not message.endswith("_terrain"):
+            message = message.replace("terrain", "_terrain")
+
+        try:
+            return Field[message.upper()]
+        except KeyError:
+            logging.getLogger("poke-env").warning(
+                "Unexpected field '%s' received. Field._UNKNOWN will be used instead. "
+                "If this is unexpected, please open an issue at "
+                "https://github.com/hsahovic/poke-env/issues/ along with this error "
+                "message and a description of your program.",
+                message,
+            )
+            return Field._UNKNOWN

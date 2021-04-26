@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-from poke_env.data import MOVES
+from poke_env.data import MOVES, GEN_TO_MOVES
+from poke_env.environment.field import Field
 from poke_env.environment.move_category import MoveCategory
 from poke_env.environment.pokemon_type import PokemonType
 from poke_env.environment.status import Status
@@ -13,7 +14,6 @@ from typing import Optional
 from typing import Set
 from typing import Tuple
 from typing import Union
-
 
 SPECIAL_MOVES: Dict
 
@@ -54,7 +54,9 @@ class Move:
         "beforeMoveCallback",
     ]
 
-    __slots__ = "_id", "_current_pp", "_is_empty", "_request_target"
+    MOVES_DICT = GEN_TO_MOVES[8]
+
+    __slots__ = "_id", "_current_pp", "_dynamaxed_move", "_is_empty", "_request_target"
 
     def __init__(self, move: str = "", move_id: Optional[str] = None):
         if move_id:
@@ -64,6 +66,7 @@ class Move:
         self._current_pp = self.max_pp
         self._is_empty: bool = False
 
+        self._dynamaxed_move = None
         self._request_target = None
 
     def __repr__(self) -> str:
@@ -215,6 +218,18 @@ class Move:
         return 0.0
 
     @property
+    def dynamaxed(self):
+        """
+        :return: The dynamaxed version of the move.
+        :rtype: DynamaxMove
+        """
+        if self._dynamaxed_move:
+            return self._dynamaxed_move
+
+        self._dynamaxed_move = DynamaxMove(self)
+        return self._dynamaxed_move
+
+    @property
     def entry(self) -> dict:
         """
         Should not be used directly.
@@ -222,10 +237,10 @@ class Move:
         :return: The data entry corresponding to the move
         :rtype: dict
         """
-        if self._id in MOVES:
-            return MOVES[self._id]
-        elif self._id.startswith("z") and self._id[1:] in MOVES:
-            return MOVES[self._id[1:]]
+        if self._id in self.MOVES_DICT:
+            return self.MOVES_DICT[self._id]
+        elif self._id.startswith("z") and self._id[1:] in self.MOVES_DICT:
+            return self.MOVES_DICT[self._id[1:]]
         else:
             raise ValueError("Unknown move: %s" % self._id)
 
@@ -588,12 +603,15 @@ class Move:
         return self.entry["target"]
 
     @property
-    def terrain(self) -> Optional[str]:
+    def terrain(self) -> Optional[Field]:
         """
         :return: Terrain started by the move.
-        :rtype: Optional[str]
+        :rtype: Optional[Field]
         """
-        return self.entry.get("terrain", None)
+        terrain = self.entry.get("terrain", None)
+        if terrain is not None:
+            terrain = Field.from_showdown_message(terrain)
+        return terrain
 
     @property
     def thaws_target(self) -> bool:
@@ -703,4 +721,181 @@ class EmptyMove(Move):
             return 0
 
 
+class Gen4Move(Move):
+    MOVES_DICT = GEN_TO_MOVES[4]
+
+
+class Gen5Move(Move):
+    MOVES_DICT = GEN_TO_MOVES[5]
+
+
+class Gen6Move(Move):
+    MOVES_DICT = GEN_TO_MOVES[6]
+
+
+class Gen7Move(Move):
+    MOVES_DICT = GEN_TO_MOVES[7]
+
+
+class Gen8Move(Move):
+    MOVES_DICT = GEN_TO_MOVES[8]
+
+
+GEN_TO_MOVE_CLASS = {
+    4: Gen4Move,
+    5: Gen5Move,
+    6: Gen6Move,
+    7: Gen7Move,
+    8: Gen8Move,
+}
+
 SPECIAL_MOVES = {"struggle": Move("struggle"), "recharge": EmptyMove("recharge")}
+
+
+class DynamaxMove(Move):
+    BOOSTS_MAP = {
+        PokemonType.BUG: {"spa": -1},
+        PokemonType.DARK: {"spd": -1},
+        PokemonType.DRAGON: {"att": -1},
+        PokemonType.GHOST: {"def": -1},
+        PokemonType.NORMAL: {"spe": -1},
+    }
+    SELF_BOOSTS_MAP = {
+        PokemonType.FIGHTING: {"att": +1},
+        PokemonType.FLYING: {"spe": +1},
+        PokemonType.GROUND: {"spd": +1},
+        PokemonType.POISON: {"spa": +1},
+        PokemonType.STEEL: {"def": +1},
+    }
+    TERRAIN_MAP = {
+        PokemonType.ELECTRIC: Field.ELECTRIC_TERRAIN,
+        PokemonType.FAIRY: Field.MISTY_TERRAIN,
+        PokemonType.GRASS: Field.GRASSY_TERRAIN,
+        PokemonType.PSYCHIC: Field.PSYCHIC_TERRAIN,
+    }
+    WEATHER_MAP = {
+        PokemonType.FIRE: Weather.SUNNYDAY,
+        PokemonType.ICE: Weather.HAIL,
+        PokemonType.ROCK: Weather.SANDSTORM,
+        PokemonType.WATER: Weather.RAINDANCE,
+    }
+
+    def __init__(self, parent: Move):
+        self._parent: Move = parent
+
+    def __getattr__(self, name):
+        return getattr(self._parent, name)
+
+    @property
+    def accuracy(self):
+        return 1
+
+    @property
+    def base_power(self) -> int:
+        if self.category != MoveCategory.STATUS:
+            base_power = self._parent.base_power
+            if self.type in {PokemonType.POISON, PokemonType.FIGHTING}:
+                if base_power < 40:
+                    return 70
+                if base_power < 50:
+                    return 75
+                if base_power < 60:
+                    return 80
+                if base_power < 70:
+                    return 85
+                if base_power < 100:
+                    return 90
+                if base_power < 140:
+                    return 95
+                return 100
+            else:
+                if base_power < 40:
+                    return 90
+                if base_power < 50:
+                    return 100
+                if base_power < 60:
+                    return 110
+                if base_power < 70:
+                    return 120
+                if base_power < 100:
+                    return 130
+                if base_power < 140:
+                    return 140
+                return 150
+        return 0
+
+    @property
+    def boosts(self) -> Optional[Dict[str, float]]:
+        if self.category != MoveCategory.STATUS:
+            return self.BOOSTS_MAP.get(self.type, None)
+        return None
+
+    @property
+    def breaks_protect(self):
+        return False
+
+    @property
+    def crit_ratio(self):
+        return 0
+
+    @property
+    def damage(self):
+        return 0
+
+    @property
+    def defensive_category(self):
+        return self.category
+
+    @property
+    def expected_hits(self):
+        return 1
+
+    @property
+    def force_switch(self):
+        return False
+
+    @property
+    def heal(self):
+        return 0
+
+    @property
+    def is_protect_counter(self):
+        return self.category == MoveCategory.STATUS
+
+    @property
+    def is_protect_move(self):
+        return self.category == MoveCategory.STATUS
+
+    @property
+    def n_hit(self):
+        return 1
+
+    @property
+    def priority(self):
+        return 0
+
+    @property
+    def recoil(self):
+        return 0
+
+    @property
+    def self_boost(self) -> Optional[Dict[str, float]]:
+        if self.category != MoveCategory.STATUS:
+            return self.SELF_BOOSTS_MAP.get(self.type, None)
+        return None
+
+    @property
+    def status(self):
+        return None
+
+    @property
+    def terrain(self) -> Optional[Field]:
+        if self.category != MoveCategory.STATUS:
+            return self.TERRAIN_MAP.get(self.type, None)
+        return None
+
+    @property
+    def weather(self) -> Optional[Weather]:
+        if self.category != MoveCategory.STATUS:
+            return self.WEATHER_MAP.get(self.type, None)
+        return None

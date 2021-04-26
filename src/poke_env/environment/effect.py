@@ -3,8 +3,7 @@
 """
 # pyre-ignore-all-errors[45]
 
-from poke_env.exceptions import UnexpectedEffectException
-
+import logging
 from enum import Enum, unique, auto
 from typing import Set
 
@@ -13,6 +12,7 @@ from typing import Set
 class Effect(Enum):
     """Enumeration, represent an effect a Pokemon can be affected by."""
 
+    _UNKNOWN = auto()
     AFTER_YOU = auto()
     AFTERMATH = auto()
     AQUA_RING = auto()
@@ -40,6 +40,7 @@ class Effect(Enum):
     DISGUISE = auto()
     DOOM_DESIRE = auto()
     DYNAMAX = auto()
+    EERIE_SPELL = auto()
     ELECTRIC_TERRAIN = auto()
     EMBARGO = auto()
     EMERGENCY_EXIT = auto()
@@ -55,9 +56,11 @@ class Effect(Enum):
     FORESIGHT = auto()
     FOREWARN = auto()
     FUTURE_SIGHT = auto()
+    G_MAX_CENTIFERNO = auto()
     G_MAX_CHI_STRIKE = auto()
     G_MAX_ONE_BLOW = auto()
     G_MAX_RAPID_FLOW = auto()
+    G_MAX_SANDBLAST = auto()
     GRAVITY = auto()
     GRUDGE = auto()
     GUARD_SPLIT = auto()
@@ -94,6 +97,7 @@ class Effect(Enum):
     MIST = auto()
     MISTY_TERRAIN = auto()
     MUMMY = auto()
+    NEUTRALIZING_GAS = auto()
     NIGHTMARE = auto()
     NO_RETREAT = auto()
     OBLIVIOUS = auto()
@@ -117,6 +121,8 @@ class Effect(Enum):
     QUASH = auto()
     QUICK_CLAW = auto()
     QUICK_GUARD = auto()
+    REFLECT = auto()
+    RIPEN = auto()
     ROUGH_SKIN = auto()
     SAFEGUARD = auto()
     SAFETY_GOGGLES = auto()
@@ -188,7 +194,14 @@ class Effect(Enum):
         try:
             return Effect[message.upper()]
         except KeyError:
-            raise UnexpectedEffectException("Unexpected effect '%s' received" % message)
+            logging.getLogger("poke-env").warning(
+                "Unexpected effect '%s' received. Effect._UNKNOWN will be used instead. "
+                "If this is unexpected, please open an issue at "
+                "https://github.com/hsahovic/poke-env/issues/ along with this error "
+                "message and a description of your program.",
+                message,
+            )
+            return Effect._UNKNOWN
 
     @property
     def breaks_protect(self):

@@ -24,7 +24,6 @@ from poke_env.environment.double_battle import DoubleBattle
 from poke_env.environment.move import Move
 from poke_env.environment.pokemon import Pokemon
 from poke_env.exceptions import ShowdownException
-from poke_env.exceptions import UnexpectedEffectException
 from poke_env.player.player_network_interface import PlayerNetwork
 from poke_env.player.battle_order import (
     BattleOrder,
@@ -154,7 +153,8 @@ class Player(PlayerNetwork, ABC):
                         logger=self.logger,
                     )
                 else:
-                    battle = Battle(
+                    battle = Battle.from_format(
+                        format_=self._format,
                         battle_tag=battle_tag,
                         username=self.username,
                         logger=self.logger,
@@ -232,8 +232,8 @@ class Player(PlayerNetwork, ABC):
                 async with self._battle_end_condition:
                     self._battle_end_condition.notify_all()
             elif split_message[1] == "error":
-                self.logger.warning(
-                    "Error message received: %s", "|".join(split_message)
+                self.logger.log(
+                    25, "Error message received: %s", "|".join(split_message)
                 )
                 if split_message[2].startswith(
                     "[Invalid choice] Sorry, too late to make a different move"
@@ -279,13 +279,15 @@ class Player(PlayerNetwork, ABC):
                     "[Invalid choice] Incomplete choice: "
                 ):
                     await self._handle_battle_request(battle, maybe_default_order=True)
-                elif split_message[2].startswith("[Invalid choice]"):
-                    self._manage_error_in(battle)
                 elif split_message[2].startswith(
                     "[Unavailable choice]"
                 ) and split_message[2].endswith("is disabled"):
-                    self._manage_error_in(battle)
                     battle.move_on_next_request = True
+                elif split_message[2].startswith(
+                    "[Invalid choice] Can't move: You sent more choices than unfainted"
+                    " Pokémon."
+                ):
+                    await self._handle_battle_request(battle, maybe_default_order=True)
                 else:
                     self.logger.critical("Unexpected error message: %s", split_message)
             elif split_message[1] == "turn":
@@ -293,11 +295,10 @@ class Player(PlayerNetwork, ABC):
                 await self._handle_battle_request(battle)
             elif split_message[1] == "teampreview":
                 await self._handle_battle_request(battle, from_teampreview_request=True)
+            elif split_message[1] == "bigerror":
+                self.logger.warning("Received 'bigerror' message: %s", split_message)
             else:
-                try:
-                    battle._parse_message(split_message)
-                except UnexpectedEffectException as e:
-                    self.logger.exception(e)
+                battle._parse_message(split_message)
 
     async def _handle_battle_request(
         self,
@@ -315,9 +316,6 @@ class Player(PlayerNetwork, ABC):
             message = self.choose_move(battle).message
 
         await self._send_message(message, battle.battle_tag)
-
-    def _manage_error_in(self, battle: AbstractBattle):
-        pass
 
     async def _update_challenges(self, split_message: List[str]) -> None:
         """Update internal challenge state.
@@ -604,7 +602,8 @@ class Player(PlayerNetwork, ABC):
         return "/team " + "".join([str(c) for c in members])
 
     def reset_battles(self) -> None:
-        for battle in self._battles.values():
+        """Resets the player's inner battle tracker."""
+        for battle in list(self._battles.values()):
             if not battle.finished:
                 raise EnvironmentError(
                     "Can not reset player's battles while they are still running"

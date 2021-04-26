@@ -11,13 +11,16 @@ from typing import Set
 from typing import Tuple
 
 from poke_env.environment.field import Field
-from poke_env.environment.pokemon import Pokemon
+from poke_env.environment.pokemon import Pokemon, GEN_TO_POKEMON
 from poke_env.environment.side_condition import SideCondition
 from poke_env.environment.weather import Weather
 from poke_env.utils import to_id_str
 
 
 class AbstractBattle(ABC):
+
+    POKEMON_CLASS = GEN_TO_POKEMON[8]
+
     MESSAGES_TO_IGNORE = {
         "-anim",
         "-burst",
@@ -31,7 +34,6 @@ class AbstractBattle(ABC):
         "-hitcount",
         "-immune",
         "-ohko",
-        "-message",
         "-miss",
         "-notarget",
         "-nothing",
@@ -196,12 +198,12 @@ class AbstractBattle(ABC):
             )
 
         if request:
-            team[identifier] = Pokemon(request_pokemon=request)
+            team[identifier] = self.POKEMON_CLASS(request_pokemon=request)
         elif details:
-            team[identifier] = Pokemon(details=details)
+            team[identifier] = self.POKEMON_CLASS(details=details)
         else:
             species = identifier[4:]
-            team[identifier] = Pokemon(species=species)
+            team[identifier] = self.POKEMON_CLASS(species=species)
 
         return team[identifier]
 
@@ -213,10 +215,30 @@ class AbstractBattle(ABC):
     def _end_illusion(self, pokemon_name: str, details: str):
         pass
 
+    def _end_illusion_on(
+        self, illusionist: str, illusioned: Optional[Pokemon], details: str
+    ):
+        if illusionist is None:
+            raise ValueError("Cannot end illusion without an active pokemon.")
+        if illusioned is None:
+            raise ValueError("Cannot end illusion without an illusioned pokemon.")
+        illusionist_mon = self.get_pokemon(illusionist, details=details)
+
+        if illusionist_mon is illusioned:
+            return illusionist_mon
+
+        illusionist_mon._switch_in(details=details)
+        illusionist_mon.status = illusioned.status
+        illusionist_mon._set_hp(f"{illusioned.current_hp}/{illusioned.max_hp}")
+
+        illusioned._was_illusionned()
+
+        return illusionist_mon
+
     def _field_end(self, field):
         field = Field.from_showdown_message(field)
-        assert field in self.fields
-        self._fields.pop(field)
+        if field is not Field._UNKNOWN:
+            self._fields.pop(field)
 
     def _field_start(self, field):
         field = Field.from_showdown_message(field)
@@ -253,7 +275,7 @@ class AbstractBattle(ABC):
                 self._weather = {}
                 return
             else:
-                self._weather = {Weather[weather.upper()]: self.turn}
+                self._weather = {Weather.from_showdown_message(weather): self.turn}
         elif split_message[1] == "faint":
             pokemon = split_message[2]
             self.get_pokemon(pokemon)._faint()
@@ -430,6 +452,8 @@ class AbstractBattle(ABC):
             player, number = split_message[2:4]
             number = int(number)
             self._team_size[player] = number
+        elif split_message[1] in {"message", "-message"}:
+            self.logger.info("Received message: %s", split_message[2])
         else:
             raise NotImplementedError(split_message)
 
@@ -439,7 +463,7 @@ class AbstractBattle(ABC):
 
     def _register_teampreview_pokemon(self, player: str, details: str):
         if player != self._player_role:
-            mon = Pokemon(details=details)
+            mon = self.POKEMON_CLASS(details=details)
             self._teampreview_opponent_team.add(mon)
 
     def _side_end(self, side, condition):
@@ -448,7 +472,8 @@ class AbstractBattle(ABC):
         else:
             conditions = self.opponent_side_conditions
         condition = SideCondition.from_showdown_message(condition)
-        conditions.pop(condition)
+        if condition is not SideCondition._UNKNOWN:
+            conditions.pop(condition)
 
     def _side_start(self, side, condition):
         if side[:2] == self._player_role:

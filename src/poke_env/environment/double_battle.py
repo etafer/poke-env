@@ -57,15 +57,9 @@ class DoubleBattle(AbstractBattle):
             active_dict = self._opponent_active_pokemon
         active = active_dict.get(pokemon_identifier)
 
-        if active is None:
-            raise ValueError("Cannot end illusion without an active pokemon.")
-
-        pokemon = self.get_pokemon(pokemon_name, details=details)
-        pokemon._set_hp(f"{active.current_hp}/{active.max_hp}")
-        active._was_illusionned()
-        pokemon._switch_in()
-        pokemon.status = active.status
-        active_dict[pokemon_identifier] = pokemon
+        active_dict[pokemon_identifier] = self._end_illusion_on(
+            illusioned=active, illusionist=pokemon_name, details=details
+        )
 
     @staticmethod
     def _get_active_pokemon(
@@ -135,64 +129,21 @@ class DoubleBattle(AbstractBattle):
                 if self.player_role is not None:
                     if (
                         active_pokemon_number == 0
-                        and "{self.player_role}a" not in self._active_pokemon
+                        and f"{self.player_role}a" not in self._active_pokemon
                     ):
                         self._active_pokemon[f"{self.player_role}a"] = active_pokemon
-                    elif "{self.player_role}b" not in self._active_pokemon:
+                    elif f"{self.player_role}b" not in self._active_pokemon:
                         self._active_pokemon[f"{self.player_role}b"] = active_pokemon
+
+                if active_pokemon.fainted:
+                    continue
+
                 if active_request.get("trapped"):
                     self._trapped[active_pokemon_number] = True
 
-                for move in active_request["moves"]:
-                    if not move.get("disabled", False):
-                        if move["id"] in active_pokemon.moves:
-                            self._available_moves[active_pokemon_number].append(
-                                active_pokemon.moves[move["id"]]
-                            )
-                            active_pokemon.moves[move["id"]].request_target = move.get(
-                                "target", None
-                            )
-                        elif move["id"] in SPECIAL_MOVES:
-                            self._available_moves[active_pokemon_number].append(
-                                SPECIAL_MOVES[move["id"]]
-                            )
-                        else:
-                            try:
-                                if not {
-                                    "copycat",
-                                    "metronome",
-                                    "mefirst",
-                                    "mirrormove",
-                                    "assist",
-                                }.intersection(active_pokemon.moves.keys()):
-                                    self.logger.warning(
-                                        "An error occured in battle %s while adding "
-                                        "available moves. The move '%s' was either "
-                                        "unknown or not available for the active "
-                                        "pokemon: %s",
-                                        self.battle_tag,
-                                        move["id"],
-                                        active_pokemon.species,
-                                    )
-                                else:
-                                    self.logger.warning(
-                                        "The move '%s' was received in battle %s for "
-                                        "your active pokemon %s. This move could not "
-                                        "be added, but it might come from a special "
-                                        "move such as copycat or me first. If that is "
-                                        "not the case, please make sure there is an "
-                                        "explanation for this behavior or report it "
-                                        "if it is an error.",
-                                        move["id"],
-                                        self.battle_tag,
-                                        active_pokemon.species,
-                                    )
-                                move = Move(move["id"])
-                                self._available_moves[active_pokemon_number].append(
-                                    move
-                                )
-                            except AttributeError:
-                                pass
+                self._available_moves[
+                    active_pokemon_number
+                ] = active_pokemon.available_moves_from_request(active_request)
 
                 if active_request.get("canMegaEvo", False):
                     self._can_mega_evolve[active_pokemon_number] = True

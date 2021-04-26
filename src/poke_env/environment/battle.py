@@ -6,9 +6,8 @@ from typing import List
 from typing import Optional
 
 from poke_env.environment.move import Move
-from poke_env.environment.pokemon import Pokemon
+from poke_env.environment.pokemon import Pokemon, GEN_TO_POKEMON
 from poke_env.environment.abstract_battle import AbstractBattle
-from poke_env.environment.move import SPECIAL_MOVES
 
 
 class Battle(AbstractBattle):
@@ -40,11 +39,9 @@ class Battle(AbstractBattle):
         if active is None:
             raise ValueError("Cannot end illusion without an active pokemon.")
 
-        pokemon = self.get_pokemon(pokemon_name, details=details)
-        pokemon._set_hp(f"{active.current_hp}/{active.max_hp}")
-        active._was_illusionned()
-        pokemon._switch_in(details=details)
-        pokemon.status = active.status
+        self._end_illusion_on(
+            illusioned=active, illusionist=pokemon_name, details=details
+        )
 
     def _parse_request(self, request: Dict) -> None:
         """
@@ -83,55 +80,16 @@ class Battle(AbstractBattle):
 
         if "active" in request:
             active_request = request["active"][0]
-            active_pokemon = self.active_pokemon
 
             if active_request.get("trapped"):
                 self._trapped = True
 
-            if active_pokemon:
-                for move in active_request["moves"]:
-                    if not move.get("disabled", False):
-                        if move["id"] in active_pokemon.moves:
-                            self._available_moves.append(
-                                active_pokemon.moves[move["id"]]
-                            )
-                        elif move["id"] in SPECIAL_MOVES:
-                            self._available_moves.append(SPECIAL_MOVES[move["id"]])
-                        else:
-                            try:
-                                if not {
-                                    "copycat",
-                                    "metronome",
-                                    "mefirst",
-                                    "mirrormove",
-                                    "assist",
-                                }.intersection(active_pokemon.moves.keys()):
-                                    self.logger.warning(
-                                        "An error occured in battle %s while adding "
-                                        "available moves. The move '%s' was either "
-                                        "unknown or not available for the active "
-                                        "pokemon: %s",
-                                        self.battle_tag,
-                                        move["id"],
-                                        active_pokemon.species,
-                                    )
-                                else:
-                                    self.logger.info(
-                                        "The move '%s' was received in battle %s for "
-                                        "your active pokemon %s. This move could not "
-                                        "be added, but it might come from a special "
-                                        "move such as copycat or me first. If that is "
-                                        "not the case, please make sure there is an "
-                                        "explanation for this behavior or report it if "
-                                        "it is an error.",
-                                        move["id"],
-                                        self.battle_tag,
-                                        active_pokemon.species,
-                                    )
-                                move = Move(move["id"])
-                                self._available_moves.append(move)
-                            except AttributeError:
-                                pass
+            if self.active_pokemon is not None:
+                self._available_moves.extend(
+                    self.active_pokemon.available_moves_from_request(  # pyre-ignore
+                        active_request
+                    )
+                )
             if active_request.get("canMegaEvo", False):
                 self._can_mega_evolve = True
             if active_request.get("canZMove", False):
@@ -235,6 +193,20 @@ class Battle(AbstractBattle):
         """
         return self._force_switch
 
+    @staticmethod
+    def from_format(
+        format_: str, battle_tag: str, username: str, logger: Logger
+    ) -> AbstractBattle:
+        """
+        :return: A GenXBattle instance, depending on the format received
+        :rtype: Battle
+        """
+
+        gen = format_[3]  # Update when Gen 10 comes
+        return _GEN_TO_BATTLE_CLASS[gen](
+            battle_tag=battle_tag, username=username, logger=logger
+        )
+
     @property
     def maybe_trapped(self) -> bool:
         """
@@ -279,3 +251,35 @@ class Battle(AbstractBattle):
     @trapped.setter
     def trapped(self, value):
         self._trapped = value
+
+
+# Gen specific classes
+
+
+class Gen4Battle(Battle):
+    POKEMON_CLASS = GEN_TO_POKEMON[4]
+
+
+class Gen5Battle(Battle):
+    POKEMON_CLASS = GEN_TO_POKEMON[5]
+
+
+class Gen6Battle(Battle):
+    POKEMON_CLASS = GEN_TO_POKEMON[6]
+
+
+class Gen7Battle(Battle):
+    POKEMON_CLASS = GEN_TO_POKEMON[7]
+
+
+class Gen8Battle(Battle):
+    POKEMON_CLASS = GEN_TO_POKEMON[8]
+
+
+_GEN_TO_BATTLE_CLASS: Dict = {
+    "4": Gen4Battle,
+    "5": Gen5Battle,
+    "6": Gen6Battle,
+    "7": Gen7Battle,
+    "8": Gen8Battle,
+}
